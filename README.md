@@ -98,12 +98,12 @@ If you use this project, please also consider citing the datasets we used:
 
 1. **LoDoPaB-CT Dataset**:
 ```bash
-
+J. Leuschner, M. Schmidt, D. O. Baguer, et al., "LoDoPaB-CT, a benchmark dataset for low-dose computed tomography reconstruction," Sci. Data 8, 109 (2021).
 ```
 
 2. **2016 Low-Dose CT Grand Challenge Dataset**:
 ```bash
-
+McCollough, Cynthia H., et al. "Low-dose CT for the detection and classification of metastatic liver lesions: results of the 2016 low dose CT grand challenge." Medical physics 44.10(2017): e339e352
 ```
 
 
