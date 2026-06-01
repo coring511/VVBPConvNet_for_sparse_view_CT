@@ -70,7 +70,7 @@ data/
 
 | Model                | Description     | Download                                                 |
 |----------------------|-----------------|---------------------------------------------------------|
-| best_model_win128.pth | Full model      | [Baidu Pan]()       |
+| best_model.pth | Full model      | [Baidu Pan]()       |
 
 ### Training
 
