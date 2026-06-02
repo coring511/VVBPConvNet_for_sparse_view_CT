@@ -81,7 +81,7 @@ python train.py
 ### Testing
 
 ```bash
-python test.py --weight weight/best_model_win128.pth --input data/test/sinogram60views_VVBP
+python test.py --weight weight/best_model.pth --input data/test/sinogram60views_VVBP
 ```
 
 ---
