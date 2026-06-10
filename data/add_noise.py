@@ -42,6 +42,29 @@ def estimate_poisson_parameters(image, target_nsr_percent):
     return I0, sigma
 
 
+def estimate_gaussian_parameters(image, target_nsr_percent):
+    """
+    Estimate Gaussian noise standard deviation based on target NSR.
+
+    Parameters:
+        image: input image (raw grayscale values)
+        target_nsr_percent: target NSR (percentage, e.g., 5 for 5%)
+
+    Returns:
+        sigma: recommended Gaussian noise standard deviation
+    """
+    img = image.astype(np.float32)
+    img_norm = (img - img.min()) / (img.max() - img.min() + 1e-8)
+
+    sigma_signal = np.std(img_norm)
+
+    target_nsr = target_nsr_percent / 100.0
+
+    sigma_noise = target_nsr * sigma_signal
+
+    return sigma_noise
+
+
 def generate_nsr_range(nsr_min=0, nsr_max=10, n_steps=11, distribution='linear'):
     """
     Generate a sequence of NSR values from nsr_min to nsr_max.
@@ -74,6 +97,32 @@ def generate_nsr_range(nsr_min=0, nsr_max=10, n_steps=11, distribution='linear')
         raise ValueError(f"Unknown distribution type: {distribution}")
 
     return nsr_values
+
+
+def add_gaussian_noise_with_nsr(image, target_nsr_percent, sigma=None):
+    """
+    Add pure Gaussian noise with specified NSR.
+
+    Parameters:
+        image: input image
+        target_nsr_percent: target NSR (%)
+        sigma: if provided, use directly; otherwise estimate automatically
+
+    Returns:
+        noisy: noisy image
+        actual_sigma: actually used sigma
+    """
+    img = image.astype(np.float32)
+    img_norm = (img - img.min()) / (img.max() - img.min() + 1e-8)
+
+    if sigma is None:
+        sigma = estimate_gaussian_parameters(image, target_nsr_percent)
+
+    noise = np.random.randn(*img.shape) * sigma
+    noisy = img_norm + noise
+    noisy = np.clip(noisy, 0, 1)
+
+    return noisy.astype(np.float32), sigma
 
 
 def add_quantitative_noise_with_nsr(image, target_nsr_percent, anisotropic=False,
@@ -147,6 +196,210 @@ def compute_noise_metrics_fast(clean, noisy):
         'NSR_dB': nsr_db,
         'PSNR': psnr
     }
+
+
+def process_folder_gaussian_nsr_list(input_folder, output_folder, nsr_list,
+                                     save_metrics=True, verify_nsr=True):
+    """
+    Add pure Gaussian noise with specific NSR values from a list.
+
+    Parameters:
+        input_folder: input folder (noise-free images)
+        output_folder: output folder
+        nsr_list: list of target NSR percentages, e.g. [1, 3, 6]
+        save_metrics: whether to save summary CSV
+        verify_nsr: whether to verify actual NSR
+    """
+    os.makedirs(output_folder, exist_ok=True)
+
+    file_list = sorted([f for f in os.listdir(input_folder)
+                        if f.lower().endswith(('.png', '.tif', '.tiff', '.jpg'))])
+    if not file_list:
+        print("No image files found.")
+        return []
+
+    first_img = iio.imread(os.path.join(input_folder, file_list[0]))
+    if first_img.ndim == 3:
+        first_img = np.mean(first_img, axis=2)
+    img_norm = (first_img - first_img.min()) / (first_img.max() - first_img.min() + 1e-8)
+    sigma_signal = np.std(img_norm)
+
+    all_results = []
+
+    for idx, target_nsr in enumerate(nsr_list, 1):
+        sigma_noise = (target_nsr / 100.0) * sigma_signal
+
+        print(f"\n{'=' * 70}")
+        print(f"Noise level {idx}: target NSR = {target_nsr}%")
+        print(f"Sigma_noise = {sigma_noise:.6f}")
+        print(f"{'=' * 70}")
+
+        actual_nsr_list = []
+        psnr_list = []
+
+        for fname in tqdm(file_list, desc=f"Processing for NSR={target_nsr}%"):
+            img = iio.imread(os.path.join(input_folder, fname))
+            if img.ndim == 3:
+                img = np.mean(img, axis=2)
+
+            img_norm = (img - img.min()) / (img.max() - img.min() + 1e-8)
+            noise = np.random.randn(*img.shape) * sigma_noise
+            noisy = img_norm + noise
+            noisy = np.clip(noisy, 0, 1)
+
+            name, ext = os.path.splitext(fname)
+            out_name = f"{name}_gau_nsr{target_nsr}percent{ext}"
+            out_path = os.path.join(output_folder, out_name)
+            iio.imwrite(out_path, noisy)
+
+            if verify_nsr:
+                metrics = compute_noise_metrics_fast(img, noisy)
+                actual_nsr_list.append(metrics['NSR_percent'])
+                psnr_list.append(metrics['PSNR'])
+
+        if verify_nsr and actual_nsr_list:
+            avg_actual_nsr = np.mean(actual_nsr_list)
+            std_actual_nsr = np.std(actual_nsr_list)
+            avg_psnr = np.mean(psnr_list)
+            print(f"   Actual NSR: {avg_actual_nsr:.2f}% ± {std_actual_nsr:.2f}%")
+            print(f"   Error: {abs(avg_actual_nsr - target_nsr):.2f}%")
+            print(f"   Average PSNR: {avg_psnr:.2f} dB")
+
+            all_results.append({
+                'target_NSR_percent': target_nsr,
+                'sigma_noise': sigma_noise,
+                'actual_NSR_percent': avg_actual_nsr,
+                'NSR_error': abs(avg_actual_nsr - target_nsr),
+                'PSNR_mean': avg_psnr
+            })
+        else:
+            all_results.append({
+                'target_NSR_percent': target_nsr,
+                'sigma_noise': sigma_noise
+            })
+
+    if save_metrics:
+        df = pd.DataFrame(all_results)
+        summary_path = os.path.join(output_folder, 'gaussian_nsr_custom_summary.csv')
+        df.to_csv(summary_path, index=False)
+        print(f"\nSummary saved to: {summary_path}")
+
+    return all_results
+
+
+def process_folder_gaussian_nsr_sweep(input_folder, output_folder,
+                                      nsr_min=0, nsr_max=10, n_steps=11,
+                                      distribution='linear',
+                                      save_metrics=True,
+                                      verify_nsr=True):
+    """
+    Add a series of pure Gaussian noise levels (NSR from nsr_min to nsr_max)
+    to all images in a folder.
+
+    Parameters:
+        input_folder: input folder (noise-free images)
+        output_folder: output folder
+        nsr_min: minimum NSR (%)
+        nsr_max: maximum NSR (%)
+        n_steps: number of noise levels
+        distribution: NSR distribution type ('linear', 'log', 'quadratic')
+        save_metrics: whether to save metrics
+        verify_nsr: whether to verify actual NSR
+    """
+    os.makedirs(output_folder, exist_ok=True)
+
+    nsr_values = generate_nsr_range(nsr_min, nsr_max, n_steps, distribution)
+
+    print(f"\n{'=' * 70}")
+    print(f"Generating Gaussian noise sequence: NSR {nsr_min}% → {nsr_max}% ({n_steps} steps)")
+    print(f"{'=' * 70}")
+    print(f"NSR values: {[f'{v:.2f}%' for v in nsr_values]}")
+    print(f"Distribution: {distribution}")
+    print(f"{'=' * 70}\n")
+
+    file_list = sorted([f for f in os.listdir(input_folder)
+                        if f.lower().endswith(('.png', '.tif', '.tiff', '.jpg'))])
+    print(f"Number of files: {len(file_list)}\n")
+
+    first_img = iio.imread(os.path.join(input_folder, file_list[0]))
+    if first_img.ndim == 3:
+        first_img = np.mean(first_img, axis=2)
+
+    all_results = []
+
+    for idx, target_nsr in enumerate(nsr_values, 1):
+        sigma = estimate_gaussian_parameters(first_img, target_nsr)
+
+        sub_folder = output_folder
+        os.makedirs(sub_folder, exist_ok=True)
+
+        print(f"\n{'=' * 70}")
+        print(f"Noise level {idx}/{n_steps}: target NSR = {target_nsr:.2f}%")
+        print(f"{'=' * 70}")
+        print(f"Estimated Gaussian sigma = {sigma:.6f}")
+
+        actual_nsr_list = []
+        psnr_list = []
+
+        for fname in tqdm(file_list, desc=f"Processing images"):
+            img = iio.imread(os.path.join(input_folder, fname))
+            if img.ndim == 3:
+                img = np.mean(img, axis=2)
+
+            noisy, used_sigma = add_gaussian_noise_with_nsr(img, target_nsr, sigma)
+
+            name, ext = os.path.splitext(fname)
+            out_name = f"{name}_gau{idx:02d}_nsr{target_nsr:.1f}{ext}"
+            out_path = os.path.join(sub_folder, out_name)
+            iio.imwrite(out_path, noisy)
+
+            if verify_nsr:
+                metrics = compute_noise_metrics_fast(img, noisy)
+                actual_nsr_list.append(metrics['NSR_percent'])
+                psnr_list.append(metrics['PSNR'])
+
+        if verify_nsr and actual_nsr_list:
+            avg_actual_nsr = np.mean(actual_nsr_list)
+            std_actual_nsr = np.std(actual_nsr_list)
+            avg_psnr = np.mean(psnr_list)
+
+            print(f"\nVerification results:")
+            print(f"   Target NSR: {target_nsr:.2f}%")
+            print(f"   Actual NSR: {avg_actual_nsr:.2f}% ± {std_actual_nsr:.2f}%")
+            print(f"   Error: {abs(avg_actual_nsr - target_nsr):.2f}%")
+            print(f"   Average PSNR: {avg_psnr:.2f} dB")
+
+            result = {
+                'index': idx,
+                'target_NSR_percent': target_nsr,
+                'sigma': sigma,
+                'actual_NSR_percent': avg_actual_nsr,
+                'NSR_std': std_actual_nsr,
+                'NSR_error': abs(avg_actual_nsr - target_nsr),
+                'PSNR_mean': avg_psnr
+            }
+        else:
+            result = {
+                'index': idx,
+                'target_NSR_percent': target_nsr,
+                'sigma': sigma
+            }
+
+        all_results.append(result)
+        print(f"Completed: {sub_folder}")
+
+    if save_metrics:
+        df = pd.DataFrame(all_results)
+        summary_path = os.path.join(output_folder, 'gaussian_nsr_sweep_summary.csv')
+        df.to_csv(summary_path, index=False)
+        print(f"\n{'=' * 70}")
+        print(f"Gaussian NSR sweep summary")
+        print(f"{'=' * 70}")
+        print(df.to_string(index=False))
+        print(f"\nSummary saved to: {summary_path}")
+        print(f"{'=' * 70}\n")
+
+    return all_results
 
 
 def process_folder_nsr_sweep(input_folder, output_folder,
@@ -376,6 +629,19 @@ if __name__ == '__main__':
     input_folder =  './test/sinogram60views'
     output_folder = './test/sinogram60views_noise'   # output folder
 
+    # ==================== Training ====================
+    # input_folder = './train/sinogram60views'
+    # output_folder = './train/sinogram60views_gaussian_noise'
+    #
+    # results = process_folder_gaussian_nsr_list(
+    #     input_folder=input_folder,
+    #     output_folder=output_folder,
+    #     nsr_list=[1, 3, 6],
+    #     save_metrics=True,
+    #     verify_nsr=True
+    # )
+
+    # ==================== Inference ====================
     results = process_folder_nsr_sweep(
         input_folder=input_folder,
         output_folder=output_folder,
